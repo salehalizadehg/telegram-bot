@@ -4,10 +4,14 @@ from database import init_db, save_user, get_user_by_id, log_attendance
 from qr_utils import generate_qr_for_member
 
 # ---- تنظیمات ----
-BOT_TOKEN = os.getenv("7899936164:AAHc-cKh_LbF-y5m535Opuwy_KVhLuPVHTg")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN در Environment Variables پیدا نشد.")
-
+print("🔍 Checking BOT_TOKEN from environment...")
+if BOT_TOKEN:
+    print("✅ BOT_TOKEN loaded successfully!")
+else:
+    print("❌ BOT_TOKEN not found! Please check Render environment variables.")
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # ---- راه‌اندازی دیتابیس ----
