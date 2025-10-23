@@ -2,21 +2,23 @@ import os
 import telebot
 from database import init_db, save_user, get_user_by_id, log_attendance
 from qr_utils import generate_qr_for_member
+from flask import Flask
 
-# ---- تنظیمات ----
+# ---- Flask برای باز کردن پورت Render ----
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    return "🤖 Teymouri Club Bot is running!"
+
+# ---- تنظیمات بات تلگرام ----
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN در Environment Variables پیدا نشد.")
-print("🔍 Checking BOT_TOKEN from environment...")
-if BOT_TOKEN:
-    print("✅ BOT_TOKEN loaded successfully!")
-else:
-    print("❌ BOT_TOKEN not found! Please check Render environment variables.")
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # ---- راه‌اندازی دیتابیس ----
 init_db()
-
 
 # 🧾 /start - شروع و ثبت‌نام اولیه
 @bot.message_handler(commands=['start'])
@@ -32,7 +34,6 @@ def start(message):
         msg = bot.send_message(user_id, "🎉 به مجموعه ورزشی تیموری خوش اومدی!\nلطفاً نام و نام خانوادگی‌ات رو وارد کن:")
         bot.register_next_step_handler(msg, process_name_step)
 
-
 # 🧍 ثبت نام کاربر جدید
 def process_name_step(message):
     user_id = message.from_user.id
@@ -43,7 +44,6 @@ def process_name_step(message):
 
     with open(qr_path, "rb") as qr:
         bot.send_photo(user_id, qr, caption=f"✅ {full_name} عزیز، ثبت‌نامت با موفقیت انجام شد!\nاین QR مخصوص شماست.")
-
 
 # 📸 /myqr - نمایش QR
 @bot.message_handler(commands=['myqr'])
@@ -64,7 +64,6 @@ def myqr(message):
         with open(qr_path, "rb") as qr:
             bot.send_photo(user_id, qr, caption="QR اختصاصی شما 🎟")
 
-
 # 🕓 /attendance - ثبت حضور (مربی یا مدیر)
 @bot.message_handler(commands=['attendance'])
 def attendance(message):
@@ -80,7 +79,15 @@ def attendance(message):
     except Exception as e:
         bot.reply_to(message, f"❌ خطا در ثبت حضور: {e}")
 
+# ---- اجرای همزمان بات و وب‌سرور ----
+import threading
 
-# ---- اجرای بات ----
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+
+flask_thread = threading.Thread(target=run_flask)
+flask_thread.start()
+
 print("🤖 Teymouri Club Bot is running...")
 bot.infinity_polling()
