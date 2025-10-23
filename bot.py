@@ -1,174 +1,82 @@
-# bot.py
 import os
 import telebot
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton
-from dotenv import load_dotenv
-from database import (
-    ensure_db, add_member, get_member_by_tg, generate_qr_for_member, get_member_by_id,
-    add_attendance, attendance_report, list_members, get_member_by_id as db_get_member_by_id
-)
-from database import ensure_db as db_ensure
-import qr_utils
-import traceback
+from database import init_db, save_user, get_user_by_id, log_attendance
+from qr_utils import generate_qr_for_member
 
-# load .env if exists (locally)
-load_dotenv()
-
+# ---- تنظیمات ----
 BOT_TOKEN = os.getenv("7899936164:AAHc-cKh_LbF-y5m535Opuwy_KVhLuPVHTg")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # optional admin id for /members and reports
-
 if not BOT_TOKEN:
-    print("❌ BOT_TOKEN not set. Set the BOT_TOKEN environment variable.")
-    exit(1)
+    raise ValueError("❌ BOT_TOKEN در Environment Variables پیدا نشد.")
 
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+bot = telebot.TeleBot(BOT_TOKEN)
 
-# Ensure DB exists
-db_ensure()
+# ---- راه‌اندازی دیتابیس ----
+init_db()
 
-# --- Helpers ---
-def safe_send_photo(chat_id, path, caption=None):
-    try:
-        with open(path, "rb") as f:
-            bot.send_photo(chat_id, f, caption=caption)
-    except Exception as e:
-        bot.send_message(chat_id, f"خطا در ارسال عکس: {e}")
 
-# --- Start / registration flow ---
+# 🧾 /start - شروع و ثبت‌نام اولیه
 @bot.message_handler(commands=['start'])
-def cmd_start(message):
-    tg_id = message.from_user.id
-    member = get_member_by_tg(tg_id)
-    if member:
-        bot.reply_to(message, f"👋 خوش آمدی {member[2]}! تو قبلاً ثبت‌نام کردی. از /myqr برای مشاهدهٔ QR خودت استفاده کن.")
-        return
+def start(message):
+    user_id = message.from_user.id
+    user = get_user_by_id(user_id)
 
-    msg = bot.reply_to(message, "خوش آمدی به باشگاه تیموری 🌿\nلطفاً <b>نام و نام خانوادگی</b> خود را وارد کن:")
-    bot.register_next_step_handler(msg, process_name)
-
-def process_name(message):
-    try:
-        name = message.text.strip()
-        tg_id = message.from_user.id
-        username = message.from_user.username or ""
-        # Create member entry (qr_path will be updated)
-        member_id = add_member(tg_id, name, username, role='member', qr_code_path=None)
-        # generate qr and update db
-        qr_path = qr_utils.generate_qr_for_member(member_id, name)
-        add_member(tg_id, name, username, role='member', qr_code_path=qr_path)  # updates qr path
-        bot.send_message(message.chat.id, f"✅ ثبت‌نام شما با موفقیت انجام شد، {name}!\nQR اختصاصی شما ارسال شد.")
-        safe_send_photo(message.chat.id, qr_path, caption="این QR کد اختصاصی شماست — آن را نگه دارید.")
-    except Exception as e:
-        traceback.print_exc()
-        bot.reply_to(message, f"متاسفانه خطایی رخ داد: {e}")
-
-# --- /myqr command ---
-@bot.message_handler(commands=['myqr'])
-def cmd_myqr(message):
-    tg_id = message.from_user.id
-    member = get_member_by_tg(tg_id)
-    if not member:
-        bot.reply_to(message, "شما هنوز ثبت‌نام نکرده‌اید. لطفاً /start را بفرستید و نام خود را وارد کنید.")
-        return
-    qr_path = member[6]  # qr_code_path
-    if qr_path and os.path.exists(qr_path):
-        safe_send_photo(message.chat.id, qr_path, caption="QR اختصاصی شما 📱")
+    if user:
+        bot.send_message(user_id, f"👋 سلام {user[1]}!\nQR کد اختصاصی‌ت قبلاً ساخته شده ✅")
+        with open(f"data/qrcodes/{user_id}.png", "rb") as qr:
+            bot.send_photo(user_id, qr, caption="این QR مخصوص شماست 🎟")
     else:
-        # regenerate
-        member_id = member[0]
-        qr_path = qr_utils.generate_qr_for_member(member_id, member[2])
-        add_member(tg_id, member[2], member[3], role=member[4], qr_code_path=qr_path)
-        safe_send_photo(message.chat.id, qr_path, caption="QR اختصاصی شما (تولید مجدد) 📱")
+        msg = bot.send_message(user_id, "🎉 به مجموعه ورزشی تیموری خوش اومدی!\nلطفاً نام و نام خانوادگی‌ات رو وارد کن:")
+        bot.register_next_step_handler(msg, process_name_step)
 
-# --- Handle incoming photos/documents (assume a coach scans member's QR and sends photo to bot) ---
-@bot.message_handler(content_types=['photo', 'document'])
-def handle_incoming_file(message):
-    try:
-        # download the file bytes
-        file_info = None
-        file_bytes = None
-        if message.content_type == 'photo':
-            file_info = bot.get_file(message.photo[-1].file_id)
-            file_bytes = bot.download_file(file_info.file_path)
-        elif message.content_type == 'document':
-            file_info = bot.get_file(message.document.file_id)
-            file_bytes = bot.download_file(file_info.file_path)
-        else:
-            bot.reply_to(message, "لطفاً عکس QR را ارسال کنید.")
-            return
 
-        decoded = qr_utils.decode_qr_from_bytes(file_bytes)
-        if not decoded:
-            bot.reply_to(message, "QR خوانده نشد. لطفاً تصویر واضح‌تری ارسال کنید یا از /myqr استفاده کنید.")
-            return
+# 🧍 ثبت نام کاربر جدید
+def process_name_step(message):
+    user_id = message.from_user.id
+    full_name = message.text.strip()
 
-        # expected payload: member:{id}
-        if decoded.startswith("member:"):
-            try:
-                member_id = int(decoded.split(":", 1)[1])
-            except:
-                bot.reply_to(message, "QR نامعتبر است.")
-                return
+    save_user(user_id, full_name)
+    qr_path = generate_qr_for_member(user_id)
 
-            member = db_get_member_by_id(member_id)
-            if not member:
-                bot.reply_to(message, "این عضو در سیستم ثبت نشده است.")
-                return
+    with open(qr_path, "rb") as qr:
+        bot.send_photo(user_id, qr, caption=f"✅ {full_name} عزیز، ثبت‌نامت با موفقیت انجام شد!\nاین QR مخصوص شماست.")
 
-            # record attendance; recorded_by is message.from_user.id (coach who scanned)
-            add_attendance(member_id, recorded_by=message.from_user.id)
-            bot.reply_to(message, f"✅ حضور برای {member[2]} ثبت شد ({member[2]}).")
-        else:
-            bot.reply_to(message, "QR نامعتبر یا متعلق به این سیستم نیست.")
-    except Exception as e:
-        traceback.print_exc()
-        bot.reply_to(message, f"خطا در پردازش عکس: {e}")
 
-# --- Admin: list members (optional, protected by ADMIN_ID) ---
-@bot.message_handler(commands=['members'])
-def cmd_members(message):
-    if ADMIN_ID and message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "⛔️ این دستور فقط برای ادمین در دسترس است.")
+# 📸 /myqr - نمایش QR
+@bot.message_handler(commands=['myqr'])
+def myqr(message):
+    user_id = message.from_user.id
+    user = get_user_by_id(user_id)
+
+    if not user:
+        bot.reply_to(message, "❌ شما هنوز ثبت‌نام نکردید. لطفاً /start رو بفرستید.")
         return
-    rows = list_members()
-    if not rows:
-        bot.reply_to(message, "هیچ عضوی ثبت نشده است.")
-        return
-    text = "<b>لیست اعضا:</b>\n\n" + "\n".join([f"{r[0]} • {r[1]} (@{r[2] or '-'}) • {r[3]} • {r[4]}" for r in rows])
-    bot.send_message(message.chat.id, text)
 
-# --- Admin: get attendance for a member: /report <member_id> ---
-@bot.message_handler(commands=['report'])
-def cmd_report(message):
-    if ADMIN_ID and message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "⛔️ این دستور فقط برای ادمین در دسترس است.")
-        return
+    qr_path = f"data/qrcodes/{user_id}.png"
+    if os.path.exists(qr_path):
+        with open(qr_path, "rb") as qr:
+            bot.send_photo(user_id, qr, caption="QR اختصاصی شما 🎟")
+    else:
+        qr_path = generate_qr_for_member(user_id)
+        with open(qr_path, "rb") as qr:
+            bot.send_photo(user_id, qr, caption="QR اختصاصی شما 🎟")
+
+
+# 🕓 /attendance - ثبت حضور (مربی یا مدیر)
+@bot.message_handler(commands=['attendance'])
+def attendance(message):
     parts = message.text.split()
-    if len(parts) < 2:
-        bot.reply_to(message, "استفاده: /report MEMBER_ID\nمثال: /report 3")
+    if len(parts) != 2:
+        bot.reply_to(message, "❌ فرمت درست: `/attendance <user_id>`")
         return
+
     try:
         member_id = int(parts[1])
-    except:
-        bot.reply_to(message, "Member ID نامعتبر است.")
-        return
-    member = db_get_member_by_id(member_id)
-    if not member:
-        bot.reply_to(message, "عضو پیدا نشد.")
-        return
-    rows = attendance_report(member_id, days=3650)
-    if not rows:
-        bot.reply_to(message, f"هیچ حضوری برای {member[2]} ثبت نشده.")
-        return
-    text = f"<b>گزارش حضور برای {member[2]}:</b>\n" + "\n".join([f"{r[0]} — {r[1]}" for r in rows])
-    bot.send_message(message.chat.id, text)
+        log_attendance(member_id)
+        bot.reply_to(message, f"✅ حضور عضو {member_id} با موفقیت ثبت شد.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ خطا در ثبت حضور: {e}")
 
-# --- default handler ---
-@bot.message_handler(func=lambda m: True)
-def fallback(m):
-    bot.reply_to(m, "دستور شناخته‌شده نیست. از /start برای ثبت‌نام یا /myqr برای دریافت QR استفاده کن.")
 
-# --- Run ---
-if __name__ == "__main__":
-    print("🤖 Teymouri Club Bot is running...")
-    bot.infinity_polling(timeout=60, long_polling_timeout=5)
+# ---- اجرای بات ----
+print("🤖 Teymouri Club Bot is running...")
+bot.infinity_polling()
